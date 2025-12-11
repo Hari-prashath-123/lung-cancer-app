@@ -5,6 +5,8 @@ from PIL import Image
 import numpy as np
 import json
 import os
+import cv2
+from tensorflow.keras.models import Model
 
 # Page configuration
 st.set_page_config(page_title="Lung Cancer Prediction", layout="wide")
@@ -51,9 +53,86 @@ def load_class_names():
         st.error(f"Failed to load class names from {CLASS_NAMES_PATH}: {e}")
         st.stop()
 
+def create_confidence_heatmap(prediction_output, class_names, predicted_index):
+    """Create a visual heatmap showing prediction parameters and confidence breakdown.
+    
+    Args:
+        prediction_output: Raw model output
+        class_names: List of class names
+        predicted_index: Index of predicted class
+    
+    Returns:
+        PIL Image with confidence visualization
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use('Agg')
+    
+    fig, ax = plt.subplots(figsize=(6, 4), facecolor='#0E1117')
+    ax.set_facecolor('#0E1117')
+    
+    # Get probabilities for all classes
+    pred = np.array(prediction_output)
+    if pred.shape[-1] == 1:
+        # Binary classification
+        probs = [1 - float(pred[0, 0]), float(pred[0, 0])]
+    else:
+        probs = pred[0]
+        # Apply softmax if needed
+        exp_probs = np.exp(probs - np.max(probs))
+        probs = exp_probs / np.sum(exp_probs)
+    
+    # Create bar chart
+    colors = ['#00cc66' if i == predicted_index else '#ff4b4b' for i in range(len(class_names))]
+    bars = ax.barh(class_names, probs, color=colors, alpha=0.8)
+    
+    # Add value labels
+    for i, (bar, prob) in enumerate(zip(bars, probs)):
+        ax.text(prob + 0.02, i, f'{prob:.1%}', 
+                va='center', color='white', fontsize=10, weight='bold')
+    
+    ax.set_xlabel('Confidence Score', color='white', fontsize=11)
+    ax.set_title('Prediction Breakdown', color='white', fontsize=13, weight='bold', pad=15)
+    ax.set_xlim(0, 1.0)
+    ax.tick_params(colors='white')
+    ax.spines['bottom'].set_color('white')
+    ax.spines['left'].set_color('white')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    
+    # Convert to PIL Image
+    fig.canvas.draw()
+    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+    img = img[:, :, :3]  # Remove alpha channel
+    plt.close(fig)
+    
+    return Image.fromarray(img)
+
 # Load model and class names
 model = load_model()
 class_names = load_class_names()
+
+# Sidebar with model info (for debugging)
+with st.sidebar:
+    st.subheader("Model Information")
+    st.write(f"**Input shape:** {model.input_shape}")
+    st.write(f"**Output shape:** {model.output_shape}")
+    st.write(f"**Total layers:** {len(model.layers)}")
+    
+    # Find and display convolutional layers
+    conv_layers = [l.name for l in model.layers if isinstance(l, tf.keras.layers.Conv2D) or 'conv' in l.name.lower()]
+    if conv_layers:
+        with st.expander("Convolutional Layers"):
+            for layer_name in conv_layers[-5:]:  # Show last 5
+                st.text(f"• {layer_name}")
+    
+    # Show last 10 layers
+    with st.expander("Last 10 Layers"):
+        for layer in model.layers[-10:]:
+            st.text(f"• {layer.name} ({type(layer).__name__})")
 
 # Title and subtitle
 st.title("🫁 Lung Cancer Prediction")
@@ -81,6 +160,10 @@ if "prediction" not in st.session_state:
     st.session_state.prediction = None
 if "confidence" not in st.session_state:
     st.session_state.confidence = None
+if "confidence_chart" not in st.session_state:
+    st.session_state.confidence_chart = None
+if "prediction_output" not in st.session_state:
+    st.session_state.prediction_output = None
 
 # Handle file upload
 if uploaded_file is not None:
@@ -200,12 +283,20 @@ if predict_button and st.session_state.uploaded_image is not None:
 
         st.session_state.prediction = str(predicted_class)
         st.session_state.confidence = float(confidence)
+        st.session_state.prediction_output = prediction_output
+        
+        # Generate confidence breakdown visualization
+        st.session_state.confidence_chart = create_confidence_heatmap(
+            prediction_output, class_names, predicted_index
+        )
 
 # Handle clear button
 if clear_button:
     st.session_state.uploaded_image = None
     st.session_state.prediction = None
     st.session_state.confidence = None
+    st.session_state.confidence_chart = None
+    st.session_state.prediction_output = None
     st.rerun()
 
 # Display prediction result
@@ -225,3 +316,20 @@ if st.session_state.prediction is not None:
 elif st.session_state.uploaded_image is not None:
     with prediction_placeholder.container():
         st.info("Click the Predict button to analyze the image.")
+
+# Confidence Breakdown Visualization
+if st.session_state.confidence_chart is not None:
+    st.divider()
+    st.subheader("📊 Confidence Breakdown Analysis")
+    st.markdown(
+        """This visualization shows the model's confidence distribution across all possible classes. 
+        The predicted class is highlighted in green, while other classes are shown in red. 
+        The horizontal bars represent the probability scores that determine the final prediction."""
+    )
+    
+    # Display confidence chart
+    st.image(
+        st.session_state.confidence_chart,
+        caption="Model Confidence Distribution",
+        use_column_width=True
+    )
